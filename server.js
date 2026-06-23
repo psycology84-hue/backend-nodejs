@@ -1,3 +1,4 @@
+```javascript
 require("dotenv").config();
 console.log("🚀 SERVER START");
 
@@ -266,3 +267,4 @@ app.listen(PORT,()=>{
 console.log(`✅ Server berjalan di port ${PORT}`);
 
 });
+```

@@ -22,8 +22,8 @@ app.use(cors({
   credentials: true
 }));
 
-// penting untuk preflight request – pakai regex untuk semua path
-app.options(/.*/, cors());
+// app.use(cors()) sudah otomatis menangani preflight OPTIONS
+// Tidak perlu menambahkan app.options() lagi
 
 app.use(express.json());
 

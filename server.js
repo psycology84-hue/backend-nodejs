@@ -22,8 +22,8 @@ app.use(cors({
   credentials: true
 }));
 
-// penting untuk preflight request
-app.options("*", cors());
+// penting untuk preflight request – pakai regex untuk semua path
+app.options(/.*/, cors());
 
 app.use(express.json());
 
@@ -209,39 +209,106 @@ message:"OPENROUTER_API_KEY belum diisi"
 
 }
 
-const response=await fetch(
+// Ambil parameter dari frontend (default: 3 soal)
+const { topic, numQuestions, learningStyle, userId } = req.body;
+const jumlah = numQuestions || 3;
+
+// Buat prompt yang meminta output JSON array of questions
+const prompt = `Buat ${jumlah} soal pilihan ganda tentang "${topic || 'umum'}" dengan gaya belajar ${learningStyle || 'reading'}. 
+Format output HARUS JSON dengan struktur:
+[
+  {
+    "question": "...",
+    "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
+    "correct": "A",
+    "explanation": "..."
+  }
+]
+Hanya berikan JSON tersebut, tanpa teks lain.`;
+
+const response = await fetch(
 "https://openrouter.ai/api/v1/chat/completions",
 {
 method:"POST",
 headers:{
 Authorization:`Bearer ${process.env.OPENROUTER_API_KEY}`,
 "Content-Type":"application/json",
-
-"HTTP-Referer":
-"https://backend-nodejs-production-714f.up.railway.app",
-
-"X-Title":
-"elearning-ai"
+"HTTP-Referer":"https://backend-nodejs-production-714f.up.railway.app",
+"X-Title":"elearning-ai"
 },
-
 body:JSON.stringify({
 model:"tencent/hy3-preview:free",
 messages:[
 {
+role:"system",
+content:"Kamu adalah generator soal. Jawab hanya dengan JSON yang diminta."
+},
+{
 role:"user",
-content:"Buat 3 soal AI dalam JSON"
+content: prompt
 }
-]
+],
+temperature:0.7,
+max_tokens:2000
 })
 }
 );
 
-const data=await response.json();
+const data = await response.json();
 
-res.json(data);
+// Log respons mentah untuk debugging (bisa dihapus setelah stabil)
+console.log("OpenRouter response:", JSON.stringify(data).substring(0, 300));
+
+// Cek apakah OpenRouter memberikan error
+if (!data.choices || data.choices.length === 0) {
+throw new Error("Tidak ada respons dari AI: " + JSON.stringify(data));
+}
+
+// Ambil teks dari pilihan pertama
+let raw = data.choices[0].message.content.trim();
+
+// Bersihkan jika ada blok kode markdown ```json ... ```
+raw = raw.replace(/^```json\s*/, "").replace(/```$/, "").trim();
+
+let questionsArray;
+try {
+questionsArray = JSON.parse(raw);
+} catch (e) {
+console.error("Gagal parse JSON dari AI:", raw.substring(0, 200));
+throw new Error("AI tidak menghasilkan JSON valid");
+}
+
+// Pastikan array
+if (!Array.isArray(questionsArray)) {
+questionsArray = [questionsArray];
+}
+
+// Simpan ke database jika db tersedia
+if (db) {
+try {
+await db.execute(
+"INSERT INTO ai_generated_quizzes (user_id, topic, num_questions, questions) VALUES (?,?,?,?)",
+[
+userId || null,
+topic || "umum",
+jumlah,
+JSON.stringify(questionsArray)
+]
+);
+} catch (dbErr) {
+console.warn("Gagal simpan quiz ke DB:", dbErr.message);
+}
+}
+
+// Kirim respons sesuai ekspektasi frontend
+return res.json({
+success: true,
+questions: questionsArray
+});
 
 }catch(err){
 
+console.error("Generate quiz error:", err);
 res.status(500).json({
 success:false,
 message:err.message
@@ -254,6 +321,8 @@ message:err.message
 // ================== UPDATE PERFORMANCE ==================
 app.post("/update_performance",(req,res)=>{
 
+// Di sini nantinya bisa ditambahkan logika update ke database.
+// Untuk sementara, langsung respons sukses.
 res.json({
 success:true,
 new_learning_style:"reading"

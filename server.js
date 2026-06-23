@@ -4,14 +4,27 @@ console.log("🚀 SERVER START");
 const fetch = require("node-fetch");
 const express = require("express");
 const cors = require("cors");
-const bodyParser = require("body-parser");
 const mysql = require("mysql2/promise");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(bodyParser.json());
+// ================== CORS FIX ==================
+app.use(cors({
+  origin: [
+    "https://elearning-ai.infinityfreeapp.com",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500"
+  ],
+  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization"],
+  credentials: true
+}));
+
+// penting untuk preflight request
+app.options("*", cors());
+
+app.use(express.json());
 
 let db = null;
 
@@ -204,7 +217,7 @@ Authorization:`Bearer ${process.env.OPENROUTER_API_KEY}`,
 "Content-Type":"application/json",
 
 "HTTP-Referer":
-"https://backend-nodejs-production-12a9.up.railway.app",
+"https://backend-nodejs-production-714f.up.railway.app",
 
 "X-Title":
 "elearning-ai"

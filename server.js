@@ -507,7 +507,7 @@ app.post("/generate-quiz", async (req, res) => {
 
             "HTTP-Referer":
 
-              "https://backend-nodejs-production-714f.up.railway.app",
+              "https://backend-nodejs-production-122d.up.railway.app",
 
             "X-Title": "elearning-ai"
 

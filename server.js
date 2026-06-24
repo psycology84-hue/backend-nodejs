@@ -196,128 +196,226 @@ message:err.message
 });
 
 // ================== GENERATE QUIZ ==================
-app.post("/generate-quiz", async(req,res)=>{
+app.post("/generate-quiz", async (req, res) => {
+  try {
+    if (!process.env.OPENROUTER_API_KEY) {
+      return res.status(500).json({
+        success: false,
+        message: "OPENROUTER_API_KEY belum diisi"
+      });
+    }
 
-try{
+    const {
+      topic = "umum",
+      numQuestions = 3,
+      learningStyle = "reading",
+      userId = null
+    } = req.body;
 
-if(!process.env.OPENROUTER_API_KEY){
+    const jumlah = Number(numQuestions) || 3;
 
-return res.status(500).json({
-success:false,
-message:"OPENROUTER_API_KEY belum diisi"
-});
+    const prompt = `
+Buat ${jumlah} soal pilihan ganda tentang "${topic}"
+dengan gaya belajar "${learningStyle}".
 
-}
+Format output HARUS JSON seperti berikut:
 
-// Ambil parameter dari frontend (default: 3 soal)
-const { topic, numQuestions, learningStyle, userId } = req.body;
-const jumlah = numQuestions || 3;
-
-// Buat prompt yang meminta output JSON array of questions
-const prompt = `Buat ${jumlah} soal pilihan ganda tentang "${topic || 'umum'}" dengan gaya belajar ${learningStyle || 'reading'}. 
-Format output HARUS JSON dengan struktur:
 [
   {
-    "question": "...",
-    "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
+    "question": "Pertanyaan",
+    "options": [
+      "A. ...",
+      "B. ...",
+      "C. ...",
+      "D. ..."
+    ],
     "correct": "A",
-    "explanation": "..."
+    "explanation": "Penjelasan"
   }
 ]
-Hanya berikan JSON tersebut, tanpa teks lain.`;
 
-const response = await fetch(
-"https://openrouter.ai/api/v1/chat/completions",
-{
-method:"POST",
-headers:{
-Authorization:`Bearer ${process.env.OPENROUTER_API_KEY}`,
-"Content-Type":"application/json",
-"HTTP-Referer":"https://backend-nodejs-production-714f.up.railway.app",
-"X-Title":"elearning-ai"
-},
-body:JSON.stringify({
-model:"tencent/hy3-preview:free",
-messages:[
-{
-role:"system",
-content:"Kamu adalah generator soal. Jawab hanya dengan JSON yang diminta."
-},
-{
-role:"user",
-content: prompt
-}
-],
-temperature:0.7,
-max_tokens:2000
-})
-}
-);
+Jangan tambahkan teks apa pun selain JSON.
+`;
 
-const data = await response.json();
+    // Timeout 30 detik
+    const controller = new AbortController();
 
-// Log respons mentah untuk debugging (bisa dihapus setelah stabil)
-console.log("OpenRouter response:", JSON.stringify(data).substring(0, 300));
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 30000);
 
-// Cek apakah OpenRouter memberikan error
-if (!data.choices || data.choices.length === 0) {
-throw new Error("Tidak ada respons dari AI: " + JSON.stringify(data));
-}
+    let response;
 
-// Ambil teks dari pilihan pertama
-let raw = data.choices[0].message.content.trim();
+    try {
+      response = await fetch(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer":
+              "https://backend-nodejs-production-714f.up.railway.app",
+            "X-Title": "elearning-ai"
+          },
+          body: JSON.stringify({
+            model: "meta-llama/llama-3.3-70b-instruct:free",
+            messages: [
+              {
+                role: "system",
+                content:
+                  "Kamu adalah generator soal. Jawab HANYA dengan JSON tanpa penjelasan tambahan."
+              },
+              {
+                role: "user",
+                content: prompt
+              }
+            ],
+            temperature: 0.7,
+            max_tokens: 2000
+          })
+        }
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
 
-// Bersihkan jika ada blok kode markdown ```json ... ```
-raw = raw.replace(/^```json\s*/, "").replace(/```$/, "").trim();
+    // Cek response OpenRouter
+    if (!response.ok) {
+      const errorText = await response.text();
 
-let questionsArray;
-try {
-questionsArray = JSON.parse(raw);
-} catch (e) {
-console.error("Gagal parse JSON dari AI:", raw.substring(0, 200));
-throw new Error("AI tidak menghasilkan JSON valid");
-}
+      throw new Error(
+        `OpenRouter Error ${response.status}: ${errorText}`
+      );
+    }
 
-// Pastikan array
-if (!Array.isArray(questionsArray)) {
-questionsArray = [questionsArray];
-}
+    const data = await response.json();
 
-// Simpan ke database jika db tersedia
-if (db) {
-try {
-await db.execute(
-"INSERT INTO ai_generated_quizzes (user_id, topic, num_questions, questions) VALUES (?,?,?,?)",
-[
-userId || null,
-topic || "umum",
-jumlah,
-JSON.stringify(questionsArray)
-]
-);
-} catch (dbErr) {
-console.warn("Gagal simpan quiz ke DB:", dbErr.message);
-}
-}
+    console.log(
+      "OpenRouter Response:",
+      JSON.stringify(data).substring(0, 500)
+    );
 
-// Kirim respons sesuai ekspektasi frontend
-return res.json({
-success: true,
-questions: questionsArray
+    // Validasi struktur respons
+    if (
+      !data.choices ||
+      !data.choices.length ||
+      !data.choices[0].message
+    ) {
+      throw new Error(
+        "Tidak ada respons valid dari AI"
+      );
+    }
+
+    let raw = data.choices[0].message.content.trim();
+
+    // Bersihkan markdown jika AI membungkus dalam ```json
+    raw = raw
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+
+    // Cari posisi JSON array
+    const start = raw.indexOf("[");
+    const end = raw.lastIndexOf("]");
+
+    if (start === -1 || end === -1) {
+      console.error(
+        "AI menghasilkan format aneh:",
+        raw
+      );
+
+      throw new Error(
+        "AI tidak menghasilkan JSON valid"
+      );
+    }
+
+    const jsonText = raw.substring(
+      start,
+      end + 1
+    );
+
+    let questionsArray;
+
+    try {
+      questionsArray = JSON.parse(jsonText);
+    } catch (parseError) {
+      console.error(
+        "JSON Parse Error:"
+      );
+
+      console.error(jsonText);
+
+      throw new Error(
+        "AI menghasilkan JSON tidak valid"
+      );
+    }
+
+    // Pastikan selalu array
+    if (!Array.isArray(questionsArray)) {
+      questionsArray = [questionsArray];
+    }
+
+    // Simpan ke database (opsional)
+    if (db) {
+      try {
+        await db.execute(
+          `
+          INSERT INTO ai_generated_quizzes
+          (user_id, topic, num_questions, questions)
+          VALUES (?, ?, ?, ?)
+          `,
+          [
+            userId,
+            topic,
+            jumlah,
+            JSON.stringify(
+              questionsArray
+            )
+          ]
+        );
+
+        console.log(
+          "✅ Quiz berhasil disimpan"
+        );
+
+      } catch (dbErr) {
+        console.warn(
+          "⚠️ Gagal simpan quiz:",
+          dbErr.message
+        );
+      }
+    }
+
+    return res.json({
+      success: true,
+      questions: questionsArray
+    });
+
+  } catch (err) {
+
+    console.error(
+      "Generate Quiz Error:",
+      err
+    );
+
+    if (err.name === "AbortError") {
+      return res.status(408).json({
+        success: false,
+        message:
+          "Request AI timeout. Coba lagi."
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message:
+        err.message ||
+        "Terjadi kesalahan server"
+    });
+  }
 });
-
-}catch(err){
-
-console.error("Generate quiz error:", err);
-res.status(500).json({
-success:false,
-message:err.message
-});
-
-}
-
-});
-
 // ================== UPDATE PERFORMANCE ==================
 app.post("/update_performance",(req,res)=>{
 

@@ -1,5 +1,3 @@
- ```javascript 
-
 require("dotenv").config();
 
 console.log("🚀 SERVER START");

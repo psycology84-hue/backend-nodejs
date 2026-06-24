@@ -20,7 +20,49 @@ const PORT = process.env.PORT || 3000;
 
 // ================== CORS FIX ==================
 
-app.use(cors());
+app.use(cors({
+
+  origin: "*",
+
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+
+  allowedHeaders: ["Content-Type", "Authorization"]
+
+}));
+
+
+
+// Custom CORS middleware untuk Express 5 compatibility
+
+app.use((req, res, next) => {
+
+  res.header("Access-Control-Allow-Origin", "*");
+
+  res.header(
+
+    "Access-Control-Allow-Headers",
+
+    "Origin, X-Requested-With, Content-Type, Accept, Authorization"
+
+  );
+
+  res.header(
+
+    "Access-Control-Allow-Methods",
+
+    "GET, POST, PUT, DELETE, OPTIONS"
+
+  );
+
+  if (req.method === "OPTIONS") {
+
+    return res.sendStatus(200);
+
+  }
+
+  next();
+
+});
 
 
 app.use(express.json());

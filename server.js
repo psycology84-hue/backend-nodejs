@@ -381,7 +381,19 @@ app.post("/analyze", async (req, res) => {
 
     );
 
-
+    // Fetch activities based on learning style
+    let activities = [];
+    if (db) {
+      try {
+        const [activityRows] = await db.execute(
+          "SELECT id, title, type, content_url, style_target FROM activities WHERE style_target = ?",
+          [learning_style]
+        );
+        activities = activityRows || [];
+      } catch (dbErr) {
+        console.error("Error fetching activities:", dbErr);
+      }
+    }
 
     return res.json({
 
@@ -391,7 +403,7 @@ app.post("/analyze", async (req, res) => {
 
       scores,
 
-      activities: []
+      activities
 
     });
 
@@ -835,7 +847,303 @@ app.post("/update_performance", (req, res) => {
 
 });
 
+// ================== GET ALL ACTIVITIES ==================
 
+app.get("/activities", async (req, res) => {
+
+  try {
+
+    if (!db) {
+
+      return res.status(500).json({
+
+        success: false,
+
+        message: "Database tidak terhubung"
+
+      });
+
+    }
+
+    const [activities] = await db.execute(
+
+      "SELECT id, title, type, content_url, style_target FROM activities ORDER BY id DESC"
+
+    );
+
+    res.json({
+
+      success: true,
+
+      activities: activities || []
+
+    });
+
+  } catch (err) {
+
+    console.error(err);
+
+    res.status(500).json({
+
+      success: false,
+
+      message: err.message
+
+    });
+
+  }
+
+});
+
+// ================== ADD ACTIVITY ==================
+
+app.post("/add-activity", async (req, res) => {
+
+  try {
+
+    if (!db) {
+
+      return res.status(500).json({
+
+        success: false,
+
+        message: "Database tidak terhubung"
+
+      });
+
+    }
+
+    const { title, type, content_url, style_target } = req.body;
+
+    if (!title || !type || !content_url || !style_target) {
+
+      return res.status(400).json({
+
+        success: false,
+
+        message: "Data tidak lengkap"
+
+      });
+
+    }
+
+    const insertQuery =
+
+      "INSERT INTO activities (title, type, content_url, style_target) VALUES (?, ?, ?, ?)";
+
+    await db.execute(insertQuery, [
+
+      title,
+
+      type,
+
+      content_url,
+
+      style_target
+
+    ]);
+
+    res.json({
+
+      success: true,
+
+      message: "Aktivitas berhasil ditambahkan"
+
+    });
+
+  } catch (err) {
+
+    console.error(err);
+
+    res.status(500).json({
+
+      success: false,
+
+      message: err.message
+
+    });
+
+  }
+
+});
+
+// ================== DELETE ACTIVITY ==================
+
+app.delete("/activity/:id", async (req, res) => {
+
+  try {
+
+    if (!db) {
+
+      return res.status(500).json({
+
+        success: false,
+
+        message: "Database tidak terhubung"
+
+      });
+
+    }
+
+    const { id } = req.params;
+
+    const deleteQuery = "DELETE FROM activities WHERE id = ?";
+
+    await db.execute(deleteQuery, [id]);
+
+    res.json({
+
+      success: true,
+
+      message: "Aktivitas berhasil dihapus"
+
+    });
+
+  } catch (err) {
+
+    console.error(err);
+
+    res.status(500).json({
+
+      success: false,
+
+      message: err.message
+
+    });
+
+  }
+
+});
+
+// ================== SEED SAMPLE ACTIVITIES ==================
+
+app.post("/seed-activities", async (req, res) => {
+
+  try {
+
+    if (!db) {
+
+      return res.status(500).json({
+
+        success: false,
+
+        message: "Database tidak terhubung"
+
+      });
+
+    }
+
+    const sampleActivities = [
+
+      {
+
+        title: "Video Pembelajaran - Matematika Dasar",
+
+        type: "video",
+
+        content_url: "https://www.youtube.com/embed/dQw4w9WgXcQ",
+
+        style_target: "visual"
+
+      },
+
+      {
+
+        title: "Teks Pembelajaran - Sejarah Indonesia",
+
+        type: "teks",
+
+        content_url: "https://example.com/sejarah.html",
+
+        style_target: "reading"
+
+      },
+
+      {
+
+        title: "Praktik Coding - JavaScript",
+
+        type: "praktik",
+
+        content_url: "https://example.com/js-practice",
+
+        style_target: "kinesthetic"
+
+      },
+
+      {
+
+        title: "Audio Pembelajaran - Bahasa Inggris",
+
+        type: "video",
+
+        content_url: "https://www.youtube.com/embed/example",
+
+        style_target: "auditory"
+
+      },
+
+      {
+
+        title: "Infografis - Biologi Sel",
+
+        type: "video",
+
+        content_url: "https://www.youtube.com/embed/biology",
+
+        style_target: "visual"
+
+      }
+
+    ];
+
+    let addedCount = 0;
+
+    for (const activity of sampleActivities) {
+
+      try {
+
+        await db.execute(
+
+          "INSERT INTO activities (title, type, content_url, style_target) VALUES (?, ?, ?, ?)",
+
+          [activity.title, activity.type, activity.content_url, activity.style_target]
+
+        );
+
+        addedCount++;
+
+      } catch (err) {
+
+        console.warn("Activity sudah ada atau error:", err.message);
+
+      }
+
+    }
+
+    res.json({
+
+      success: true,
+
+      message: `${addedCount} aktivitas berhasil ditambahkan`
+
+    });
+
+  } catch (err) {
+
+    console.error(err);
+
+    res.status(500).json({
+
+      success: false,
+
+      message: err.message
+
+    });
+
+  }
+
+});
 
 // ================== START ==================
 

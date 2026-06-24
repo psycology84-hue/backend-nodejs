@@ -1,37 +1,27 @@
 require("dotenv").config();
-
 console.log("🚀 SERVER START");
 
 const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2/promise");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ================== CORS FIX ==================
+// ================== CORS ==================
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
-
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept, Authorization"
-  );
-  res.header(
-    "Access-Control-Allow-Methods",
-    "GET, POST, PUT, DELETE, OPTIONS"
-  );
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(200);
-  }
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
-
 app.use(express.json());
 
 // ================== LOGGER ==================
@@ -42,39 +32,14 @@ app.use((req, res, next) => {
 
 let db = null;
 
-// ================== CEK API KEY ==================
-if (!process.env.OPENROUTER_API_KEY) {
-  console.warn("⚠️ OPENROUTER_API_KEY belum diatur");
-} else {
-  console.log("✅ OpenRouter API Key ditemukan");
-}
-
-// ================== DAFTAR MODEL AI (FALLBACK) ==================
-const AI_MODELS = [
-  "google/gemini-2.0-flash-exp:free",
-  "mistralai/mistral-7b-instruct:free",
-  "deepseek/deepseek-chat:free",
-  "meta-llama/llama-3.3-70b-instruct:free"
-];
-
 // ================== HEALTH CHECK ==================
 app.get("/", (req, res) => {
-  res.json({
-    status: "OK",
-    server: "AI Backend Running",
-    dbConnected: !!db
-  });
-});
-
-// ================== TEST ROUTE ==================
-app.get("/test", (req, res) => {
-  res.send("SERVER HIDUP");
+  res.json({ status: "OK", server: "AI Backend Running", dbConnected: !!db });
 });
 
 // ================== MIGRASI ==================
 async function runMigrations(database) {
   console.log("📦 Menjalankan migrasi...");
-
   const createUsersTable =
     "CREATE TABLE IF NOT EXISTS users (" +
     "id INT AUTO_INCREMENT PRIMARY KEY," +
@@ -97,14 +62,10 @@ async function runMigrations(database) {
     "kinesthetic_weight FLOAT DEFAULT 1)";
   await database.execute(createClassificationRulesTable);
 
-  const [rules] = await database.execute(
-    "SELECT COUNT(*) cnt FROM classification_rules"
-  );
+  const [rules] = await database.execute("SELECT COUNT(*) cnt FROM classification_rules");
   if (rules[0].cnt === 0) {
     await database.execute(
-      "INSERT INTO classification_rules " +
-      "(visual_weight,auditory_weight,reading_weight,kinesthetic_weight) " +
-      "VALUES (1,1,1,1)"
+      "INSERT INTO classification_rules (visual_weight,auditory_weight,reading_weight,kinesthetic_weight) VALUES (1,1,1,1)"
     );
   }
 
@@ -130,14 +91,9 @@ async function runMigrations(database) {
   console.log("✅ Migrasi selesai");
 }
 
-// ================== KONEKSI DATABASE ==================
+// ================== KONEKSI DB ==================
 (async () => {
   try {
-    console.log("DB_HOST:", process.env.DB_HOST);
-    console.log("DB_PORT:", process.env.DB_PORT);
-    console.log("DB_USER:", process.env.DB_USER);
-    console.log("DB_NAME:", process.env.DB_NAME);
-
     db = await mysql.createConnection({
       host: process.env.DB_HOST,
       port: process.env.DB_PORT,
@@ -145,14 +101,11 @@ async function runMigrations(database) {
       password: process.env.DB_PASSWORD,
       database: process.env.DB_NAME
     });
-
     console.log("✅ Database terhubung");
     await runMigrations(db);
   } catch (err) {
-    console.error("❌ Database gagal:");
-    console.error(err.message);
+    console.error("❌ Database gagal:", err.message);
     db = null;
-    console.log("⚠️ Server tetap berjalan tanpa database");
   }
 })();
 
@@ -161,190 +114,157 @@ app.post("/analyze", async (req, res) => {
   try {
     const { answers } = req.body;
     if (!Array.isArray(answers) || answers.length !== 8) {
-      return res.status(400).json({
-        success: false,
-        message: "Jawaban tidak lengkap"
-      });
+      return res.status(400).json({ success: false, message: "Jawaban tidak lengkap" });
     }
+    const scores = { visual: 0, auditory: 0, reading: 0, kinesthetic: 0 };
+    answers.forEach(a => { if (scores.hasOwnProperty(a)) scores[a]++; });
 
-    const scores = {
-      visual: 0,
-      auditory: 0,
-      reading: 0,
-      kinesthetic: 0
-    };
-
-    answers.forEach(a => {
-      if (scores.hasOwnProperty(a)) {
-        scores[a]++;
-      }
-    });
-
-    const learning_style = Object.keys(scores).reduce((a, b) =>
-      scores[a] > scores[b] ? a : b
-    );
+    const learning_style = Object.keys(scores).reduce((a, b) => scores[a] > scores[b] ? a : b);
 
     let activities = [];
     if (db) {
-      try {
-        const [activityRows] = await db.execute(
-          "SELECT id, title, type, content_url, style_target FROM activities WHERE style_target = ?",
-          [learning_style]
-        );
-        activities = activityRows || [];
-      } catch (dbErr) {
-        console.error("Error fetching activities:", dbErr);
-      }
+      const [rows] = await db.execute(
+        "SELECT id, title, type, content_url, style_target FROM activities WHERE style_target = ?",
+        [learning_style]
+      );
+      activities = rows || [];
     }
-
-    return res.json({
-      success: true,
-      learning_style,
-      scores,
-      activities
-    });
+    return res.json({ success: true, learning_style, scores, activities });
   } catch (err) {
     console.error(err);
-    res.status(500).json({
-      success: false,
-      message: err.message
-    });
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// ================== HELPER: PANGGIL OPENROUTER DENGAN FALLBACK ==================
-async function callOpenRouter(model, prompt) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
+// ================== HELPER: GEMINI ==================
+async function generateWithGemini(prompt) {
+  if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY belum diatur");
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const result = await model.generateContent(prompt);
+  const response = result.response;
+  const text = response.text();
+  if (!text) throw new Error("Gemini tidak menghasilkan teks");
+  return text;
+}
 
-  try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        Authorization: "Bearer " + process.env.OPENROUTER_API_KEY,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://backend-nodejs-production-122d.up.railway.app",
-        "X-Title": "elearning-ai"
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: [
-          {
-            role: "system",
-            content: "Kamu adalah generator soal. Jawab HANYA dengan JSON tanpa penjelasan tambahan."
-          },
-          {
-            role: "user",
-            content: prompt
-          }
-        ],
-        temperature: 0.7,
-        max_tokens: 2000
-      })
-    });
+// ================== HELPER: OPENROUTER (FALLBACK) ==================
+const OPENROUTER_MODELS = [
+  "mistralai/mistral-7b-instruct:free",
+  "deepseek/deepseek-chat:free",
+  "meta-llama/llama-3.3-70b-instruct:free"
+];
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`OpenRouter Error ${response.status}: ${errorText}`);
-    }
-
-    const data = await response.json();
-    if (!data.choices || !data.choices.length || !data.choices[0].message) {
-      throw new Error("Tidak ada respons valid dari AI");
-    }
-    return data;
-  } finally {
-    clearTimeout(timeout);
+async function generateWithOpenRouter(prompt) {
+  if (!process.env.OPENROUTER_API_KEY) {
+    throw new Error("OPENROUTER_API_KEY tidak tersedia");
   }
+  let lastError = null;
+  for (const model of OPENROUTER_MODELS) {
+    try {
+      console.log(`Mencoba model OpenRouter: ${model}`);
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + process.env.OPENROUTER_API_KEY,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://backend-nodejs-production-122d.up.railway.app",
+          "X-Title": "elearning-ai"
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: [
+            { role: "system", content: "Jawab HANYA dengan JSON tanpa penjelasan." },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.7,
+          max_tokens: 2000
+        })
+      });
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`OpenRouter Error ${response.status}: ${errText}`);
+      }
+      const data = await response.json();
+      if (!data.choices?.[0]?.message) throw new Error("Respons AI tidak valid");
+      return data.choices[0].message.content;
+    } catch (err) {
+      console.warn(`Model ${model} gagal:`, err.message);
+      lastError = err;
+    }
+  }
+  throw lastError || new Error("Semua model OpenRouter gagal");
 }
 
 // ================== GENERATE QUIZ ==================
 app.post("/generate-quiz", async (req, res) => {
   try {
-    if (!process.env.OPENROUTER_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        message: "OPENROUTER_API_KEY belum diisi"
-      });
-    }
-
     const {
       topic = "umum",
       numQuestions = 3,
       learningStyle = "reading",
       userId = null
     } = req.body;
-
     const jumlah = Number(numQuestions) || 3;
 
     const prompt =
-      "Buat " + jumlah + " soal pilihan ganda tentang \"" + topic + "\" " +
-      "dengan gaya belajar \"" + learningStyle + "\". " +
-      "Format output HARUS JSON seperti berikut: " +
-      "[{\"question\": \"Pertanyaan\", \"options\": [\"A. ...\", \"B. ...\", \"C. ...\", \"D. ...\"], " +
-      "\"correct\": \"A\", \"explanation\": \"Penjelasan\"}] " +
-      "Jangan tambahkan teks apa pun selain JSON.";
+      `Buat ${jumlah} soal pilihan ganda tentang "${topic}" dengan gaya belajar "${learningStyle}". ` +
+      `Format output HARUS JSON seperti berikut: ` +
+      `[{"question": "Pertanyaan", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct": "A", "explanation": "Penjelasan"}] ` +
+      `Jangan tambahkan teks apa pun selain JSON.`;
 
-    // Coba semua model dalam daftar, berhenti di yang berhasil
-    let data = null;
-    let lastError = null;
+    let raw = null;
+    let usedProvider = "";
 
-    for (const model of AI_MODELS) {
+    // Coba Gemini dulu
+    if (process.env.GEMINI_API_KEY) {
       try {
-        console.log(`Mencoba model: ${model}`);
-        data = await callOpenRouter(model, prompt);
-        break; // berhasil, keluar dari loop
-      } catch (err) {
-        console.warn(`Model ${model} gagal:`, err.message);
-        lastError = err;
-        // Jika error bukan 429 (rate limit), tetap lanjut coba model lain
+        raw = await generateWithGemini(prompt);
+        usedProvider = "Gemini";
+        console.log("✅ Berhasil menggunakan Gemini");
+      } catch (geminiErr) {
+        console.error("Gemini gagal:", geminiErr.message);
+        // Jika Gemini gagal, coba OpenRouter (jika tersedia)
+        if (process.env.OPENROUTER_API_KEY) {
+          try {
+            raw = await generateWithOpenRouter(prompt);
+            usedProvider = "OpenRouter (fallback)";
+            console.log("✅ Beralih ke OpenRouter");
+          } catch (openRouterErr) {
+            console.error("OpenRouter juga gagal:", openRouterErr.message);
+            throw new Error(`Gemini gagal: ${geminiErr.message}. OpenRouter juga gagal: ${openRouterErr.message}`);
+          }
+        } else {
+          throw new Error(`Gemini gagal: ${geminiErr.message}. OpenRouter tidak dikonfigurasi.`);
+        }
       }
+    } else if (process.env.OPENROUTER_API_KEY) {
+      // Jika tidak ada Gemini, langsung coba OpenRouter
+      raw = await generateWithOpenRouter(prompt);
+      usedProvider = "OpenRouter";
+    } else {
+      throw new Error("Tidak ada penyedia AI yang dikonfigurasi (GEMINI_API_KEY atau OPENROUTER_API_KEY)");
     }
-
-    if (!data) {
-      throw lastError || new Error("Semua model AI gagal menghasilkan soal");
-    }
-
-    console.log("OpenRouter Response:", JSON.stringify(data).substring(0, 500));
-
-    let raw = data.choices[0].message.content.trim();
 
     // Bersihkan markdown
-    const tick = String.fromCharCode(96);
-    const codeMarker = tick + tick + tick;
-    raw = raw.split(codeMarker + "json").join("")
-      .split(codeMarker).join("")
-      .trim();
-
+    const tick = "```";
+    raw = raw.replace(tick + "json", "").replace(tick, "").trim();
     const start = raw.indexOf("[");
     const end = raw.lastIndexOf("]");
-    if (start === -1 || end === -1) {
-      console.error("AI menghasilkan format aneh:", raw);
-      throw new Error("AI tidak menghasilkan JSON valid");
-    }
+    if (start === -1 || end === -1) throw new Error("Format JSON tidak ditemukan");
 
     const jsonText = raw.substring(start, end + 1);
-    let questionsArray;
-    try {
-      questionsArray = JSON.parse(jsonText);
-    } catch (parseError) {
-      console.error("JSON Parse Error:", jsonText);
-      throw new Error("AI menghasilkan JSON tidak valid");
-    }
+    let questionsArray = JSON.parse(jsonText);
+    if (!Array.isArray(questionsArray)) questionsArray = [questionsArray];
 
-    if (!Array.isArray(questionsArray)) {
-      questionsArray = [questionsArray];
-    }
-
-    // Simpan ke database
+    // Simpan ke DB
     if (db) {
       try {
         await db.execute(
           "INSERT INTO ai_generated_quizzes (user_id, topic, num_questions, questions) VALUES (?, ?, ?, ?)",
           [userId, topic, jumlah, JSON.stringify(questionsArray)]
         );
-        console.log("✅ Quiz berhasil disimpan");
+        console.log("✅ Quiz disimpan");
       } catch (dbErr) {
         console.warn("⚠️ Gagal simpan quiz:", dbErr.message);
       }
@@ -352,110 +272,62 @@ app.post("/generate-quiz", async (req, res) => {
 
     return res.json({
       success: true,
-      questions: questionsArray
+      questions: questionsArray,
+      provider: usedProvider
     });
   } catch (err) {
     console.error("Generate Quiz Error:", err);
-    if (err.name === "AbortError") {
-      return res.status(408).json({
-        success: false,
-        message: "Request AI timeout. Coba lagi."
-      });
-    }
-    return res.status(500).json({
-      success: false,
-      message: err.message || "Terjadi kesalahan server"
-    });
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 
 // ================== UPDATE PERFORMANCE ==================
 app.post("/update_performance", (req, res) => {
-  res.json({
-    success: true,
-    new_learning_style: "reading"
-  });
+  res.json({ success: true, new_learning_style: "reading" });
 });
 
 // ================== GET ALL ACTIVITIES ==================
 app.get("/activities", async (req, res) => {
-  try {
-    if (!db) {
-      return res.status(500).json({ success: false, message: "Database tidak terhubung" });
-    }
-    const [activities] = await db.execute(
-      "SELECT id, title, type, content_url, style_target FROM activities ORDER BY id DESC"
-    );
-    res.json({ success: true, activities: activities || [] });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: err.message });
-  }
+  if (!db) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
+  const [activities] = await db.execute("SELECT id, title, type, content_url, style_target FROM activities ORDER BY id DESC");
+  res.json({ success: true, activities });
 });
 
 // ================== ADD ACTIVITY ==================
 app.post("/add-activity", async (req, res) => {
-  try {
-    if (!db) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
-    const { title, type, content_url, style_target } = req.body;
-    if (!title || !type || !content_url || !style_target) {
-      return res.status(400).json({ success: false, message: "Data tidak lengkap" });
-    }
-    await db.execute(
-      "INSERT INTO activities (title, type, content_url, style_target) VALUES (?, ?, ?, ?)",
-      [title, type, content_url, style_target]
-    );
-    res.json({ success: true, message: "Aktivitas berhasil ditambahkan" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: err.message });
-  }
+  if (!db) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
+  const { title, type, content_url, style_target } = req.body;
+  if (!title || !type || !content_url || !style_target) return res.status(400).json({ success: false, message: "Data tidak lengkap" });
+  await db.execute("INSERT INTO activities (title, type, content_url, style_target) VALUES (?, ?, ?, ?)", [title, type, content_url, style_target]);
+  res.json({ success: true, message: "Aktivitas ditambahkan" });
 });
 
 // ================== DELETE ACTIVITY ==================
 app.delete("/activity/:id", async (req, res) => {
-  try {
-    if (!db) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
-    const { id } = req.params;
-    await db.execute("DELETE FROM activities WHERE id = ?", [id]);
-    res.json({ success: true, message: "Aktivitas berhasil dihapus" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: err.message });
-  }
+  if (!db) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
+  await db.execute("DELETE FROM activities WHERE id = ?", [req.params.id]);
+  res.json({ success: true, message: "Aktivitas dihapus" });
 });
 
-// ================== SEED SAMPLE ACTIVITIES ==================
+// ================== SEED ACTIVITIES ==================
 app.post("/seed-activities", async (req, res) => {
-  try {
-    if (!db) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
-    const sampleActivities = [
-      { title: "Video Pembelajaran - Matematika Dasar", type: "video", content_url: "https://www.youtube.com/embed/dQw4w9WgXcQ", style_target: "visual" },
-      { title: "Teks Pembelajaran - Sejarah Indonesia", type: "teks", content_url: "https://example.com/sejarah.html", style_target: "reading" },
-      { title: "Praktik Coding - JavaScript", type: "praktik", content_url: "https://example.com/js-practice", style_target: "kinesthetic" },
-      { title: "Audio Pembelajaran - Bahasa Inggris", type: "video", content_url: "https://www.youtube.com/embed/example", style_target: "auditory" },
-      { title: "Infografis - Biologi Sel", type: "video", content_url: "https://www.youtube.com/embed/biology", style_target: "visual" }
-    ];
-    let addedCount = 0;
-    for (const activity of sampleActivities) {
-      try {
-        await db.execute(
-          "INSERT INTO activities (title, type, content_url, style_target) VALUES (?, ?, ?, ?)",
-          [activity.title, activity.type, activity.content_url, activity.style_target]
-        );
-        addedCount++;
-      } catch (err) {
-        console.warn("Activity sudah ada atau error:", err.message);
-      }
-    }
-    res.json({ success: true, message: `${addedCount} aktivitas berhasil ditambahkan` });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: err.message });
+  if (!db) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
+  const sample = [
+    { title: "Video - Matematika", type: "video", content_url: "https://www.youtube.com/embed/dQw4w9WgXcQ", style_target: "visual" },
+    { title: "Teks - Sejarah", type: "teks", content_url: "https://example.com/sejarah.html", style_target: "reading" },
+    { title: "Praktik - Coding JS", type: "praktik", content_url: "https://example.com/js-practice", style_target: "kinesthetic" },
+    { title: "Audio - Bhs Inggris", type: "video", content_url: "https://www.youtube.com/embed/example", style_target: "auditory" },
+    { title: "Infografis - Biologi", type: "video", content_url: "https://www.youtube.com/embed/biology", style_target: "visual" }
+  ];
+  let count = 0;
+  for (const a of sample) {
+    try {
+      await db.execute("INSERT INTO activities (title, type, content_url, style_target) VALUES (?, ?, ?, ?)", [a.title, a.type, a.content_url, a.style_target]);
+      count++;
+    } catch (e) { console.warn("Mungkin sudah ada:", e.message); }
   }
+  res.json({ success: true, message: `${count} aktivitas ditambahkan` });
 });
 
 // ================== START ==================
-app.listen(PORT, () => {
-  console.log("✅ Server berjalan di port " + PORT);
-});
+app.listen(PORT, () => console.log(`✅ Server berjalan di port ${PORT}`));

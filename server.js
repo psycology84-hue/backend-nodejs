@@ -135,80 +135,42 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
-// ================== DAFTAR MODEL GRATIS OPENROUTER ==================
-const OPENROUTER_MODELS = [
-  "google/gemini-2.0-flash-exp:free",
-  "mistralai/mistral-7b-instruct:free",
-  "deepseek/deepseek-chat:free",
-  "huggingfaceh4/zephyr-7b-beta:free",
-  "nousresearch/nous-hermes-2-mixtral-8x7b-dpo:free",
-  "undi95/toppy-m-7b:free",
-  "gryphe/mythomax-l2-13b:free",
-  "meta-llama/llama-3.3-70b-instruct:free",
-  "meta-llama/llama-3.1-8b-instruct:free",
-  "microsoft/phi-3-mini-128k-instruct:free",
-  "qwen/qwen-2-7b-instruct:free",
-  "openchat/openchat-7b:free"
-];
-
-// ================== HELPER: PANGGIL OPENROUTER DENGAN FALLBACK ==================
-async function callOpenRouter(prompt) {
-  if (!process.env.OPENROUTER_API_KEY) {
-    throw new Error("OPENROUTER_API_KEY tidak diatur");
+// ================== HELPER: GEMINI VIA REST API ==================
+async function callGemini(prompt) {
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY tidak diatur. Silakan tambahkan di environment variables.");
   }
 
-  let lastError = null;
-  for (const model of OPENROUTER_MODELS) {
-    try {
-      console.log(`Mencoba model: ${model}`);
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30000);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
 
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          Authorization: "Bearer " + process.env.OPENROUTER_API_KEY,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://backend-nodejs-production-122d.up.railway.app",
-          "X-Title": "elearning-ai"
-        },
-        body: JSON.stringify({
-          model: model,
-          messages: [
-            { role: "system", content: "Jawab HANYA JSON tanpa penjelasan tambahan." },
-            { role: "user", content: prompt }
-          ],
-          temperature: 0.7,
-          max_tokens: 2000
-        })
-      });
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [{ text: prompt }]
+          }
+        ]
+      })
+    });
 
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.warn(`Model ${model} error ${response.status}: ${errorText}`);
-        // Jika rate limit (429), tunggu 2 detik lalu lanjut
-        if (response.status === 429) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-        continue;
-      }
-
-      const data = await response.json();
-      if (!data.choices?.[0]?.message) {
-        console.warn(`Model ${model} tidak menghasilkan teks`);
-        continue;
-      }
-      console.log(`✅ Berhasil dengan model: ${model}`);
-      return data.choices[0].message.content;
-    } catch (err) {
-      console.warn(`Model ${model} gagal:`, err.message);
-      lastError = err;
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Gemini API Error ${response.status}: ${errorText}`);
     }
+
+    const data = await response.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) throw new Error("Gemini tidak menghasilkan teks");
+    return text;
+  } finally {
+    clearTimeout(timeout);
   }
-  throw lastError || new Error("Semua model OpenRouter gagal menghasilkan soal");
 }
 
 // ================== GENERATE QUIZ ==================
@@ -229,11 +191,10 @@ app.post("/generate-quiz", async (req, res) => {
       `[{"question": "Pertanyaan", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct": "A", "explanation": "Penjelasan"}] ` +
       `Jangan tambahkan teks apa pun selain JSON.`;
 
-    const raw = await callOpenRouter(prompt);
+    const raw = await callGemini(prompt);
 
     // Bersihkan markdown
-    const tick = "```";
-    let cleaned = raw.replace(tick + "json", "").replace(tick, "").trim();
+    let cleaned = raw.replace(/```json|```/g, "").trim();
     const start = cleaned.indexOf("[");
     const end = cleaned.lastIndexOf("]");
     if (start === -1 || end === -1) throw new Error("Format JSON tidak ditemukan");
@@ -249,7 +210,6 @@ app.post("/generate-quiz", async (req, res) => {
           "INSERT INTO ai_generated_quizzes (user_id, topic, num_questions, questions) VALUES (?, ?, ?, ?)",
           [userId, topic, jumlah, JSON.stringify(questionsArray)]
         );
-        console.log("✅ Quiz disimpan");
       } catch (dbErr) {
         console.warn("Gagal simpan quiz:", dbErr.message);
       }

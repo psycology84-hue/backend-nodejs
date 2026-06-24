@@ -4,7 +4,6 @@ console.log("🚀 SERVER START");
 const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2/promise");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -32,6 +31,13 @@ app.use((req, res, next) => {
 
 let db = null;
 
+// ================== Cek API Key OpenRouter ==================
+if (!process.env.OPENROUTER_API_KEY) {
+  console.warn("⚠️ OPENROUTER_API_KEY belum diatur");
+} else {
+  console.log("✅ OpenRouter API Key ditemukan");
+}
+
 // ================== HEALTH CHECK ==================
 app.get("/", (req, res) => {
   res.json({ status: "OK", server: "AI Backend Running", dbConnected: !!db });
@@ -40,6 +46,7 @@ app.get("/", (req, res) => {
 // ================== MIGRASI ==================
 async function runMigrations(database) {
   console.log("📦 Menjalankan migrasi...");
+
   const createUsersTable =
     "CREATE TABLE IF NOT EXISTS users (" +
     "id INT AUTO_INCREMENT PRIMARY KEY," +
@@ -136,35 +143,30 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
-// ================== HELPER: GEMINI ==================
-async function generateWithGemini(prompt) {
-  if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY belum diatur");
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-  const result = await model.generateContent(prompt);
-  const response = result.response;
-  const text = response.text();
-  if (!text) throw new Error("Gemini tidak menghasilkan teks");
-  return text;
-}
-
-// ================== HELPER: OPENROUTER (FALLBACK) ==================
-const OPENROUTER_MODELS = [
+// ================== HELPER: PANGGIL OPENROUTER DENGAN RETRY & FALLBACK ==================
+const AI_MODELS = [
+  "google/gemini-2.0-flash-exp:free",
   "mistralai/mistral-7b-instruct:free",
   "deepseek/deepseek-chat:free",
+  "huggingfaceh4/zephyr-7b-beta:free",
+  "nousresearch/nous-hermes-2-mixtral-8x7b-dpo:free",
+  "undi95/toppy-m-7b:free",
+  "gryphe/mythomax-l2-13b:free",
   "meta-llama/llama-3.3-70b-instruct:free"
 ];
 
-async function generateWithOpenRouter(prompt) {
-  if (!process.env.OPENROUTER_API_KEY) {
-    throw new Error("OPENROUTER_API_KEY tidak tersedia");
-  }
+async function callOpenRouter(prompt) {
   let lastError = null;
-  for (const model of OPENROUTER_MODELS) {
+
+  for (const model of AI_MODELS) {
     try {
-      console.log(`Mencoba model OpenRouter: ${model}`);
+      console.log(`Mencoba model: ${model}`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30000);
+
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
+        signal: controller.signal,
         headers: {
           Authorization: "Bearer " + process.env.OPENROUTER_API_KEY,
           "Content-Type": "application/json",
@@ -174,31 +176,50 @@ async function generateWithOpenRouter(prompt) {
         body: JSON.stringify({
           model: model,
           messages: [
-            { role: "system", content: "Jawab HANYA dengan JSON tanpa penjelasan." },
+            { role: "system", content: "Kamu adalah generator soal. Jawab HANYA dengan JSON tanpa penjelasan tambahan." },
             { role: "user", content: prompt }
           ],
           temperature: 0.7,
           max_tokens: 2000
         })
       });
+
+      clearTimeout(timeout);
+
       if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`OpenRouter Error ${response.status}: ${errText}`);
+        const errorText = await response.text();
+        console.warn(`Model ${model} error: ${response.status} - ${errorText}`);
+        // jika rate limited (429), tunggu sebentar lalu lanjut
+        if (response.status === 429) {
+          await new Promise(resolve => setTimeout(resolve, 2000)); // tunggu 2 detik
+        }
+        continue; // coba model berikutnya
       }
+
       const data = await response.json();
-      if (!data.choices?.[0]?.message) throw new Error("Respons AI tidak valid");
-      return data.choices[0].message.content;
+      if (!data.choices || !data.choices.length || !data.choices[0].message) {
+        console.warn("Model mengembalikan respons kosong");
+        continue;
+      }
+
+      return data.choices[0].message.content.trim();
     } catch (err) {
       console.warn(`Model ${model} gagal:`, err.message);
       lastError = err;
+      // jika fetch timeout, lanjutkan
     }
   }
-  throw lastError || new Error("Semua model OpenRouter gagal");
+
+  throw lastError || new Error("Semua model AI gagal menghasilkan soal");
 }
 
 // ================== GENERATE QUIZ ==================
 app.post("/generate-quiz", async (req, res) => {
   try {
+    if (!process.env.OPENROUTER_API_KEY) {
+      return res.status(500).json({ success: false, message: "OPENROUTER_API_KEY belum diisi" });
+    }
+
     const {
       topic = "umum",
       numQuestions = 3,
@@ -208,43 +229,14 @@ app.post("/generate-quiz", async (req, res) => {
     const jumlah = Number(numQuestions) || 3;
 
     const prompt =
-      `Buat ${jumlah} soal pilihan ganda tentang "${topic}" dengan gaya belajar "${learningStyle}". ` +
-      `Format output HARUS JSON seperti berikut: ` +
-      `[{"question": "Pertanyaan", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct": "A", "explanation": "Penjelasan"}] ` +
-      `Jangan tambahkan teks apa pun selain JSON.`;
+      "Buat " + jumlah + " soal pilihan ganda tentang \"" + topic + "\" " +
+      "dengan gaya belajar \"" + learningStyle + "\". " +
+      "Format output HARUS JSON seperti berikut: " +
+      "[{\"question\": \"Pertanyaan\", \"options\": [\"A. ...\", \"B. ...\", \"C. ...\", \"D. ...\"], " +
+      "\"correct\": \"A\", \"explanation\": \"Penjelasan\"}] " +
+      "Jangan tambahkan teks apa pun selain JSON.";
 
-    let raw = null;
-    let usedProvider = "";
-
-    // Coba Gemini dulu
-    if (process.env.GEMINI_API_KEY) {
-      try {
-        raw = await generateWithGemini(prompt);
-        usedProvider = "Gemini";
-        console.log("✅ Berhasil menggunakan Gemini");
-      } catch (geminiErr) {
-        console.error("Gemini gagal:", geminiErr.message);
-        // Jika Gemini gagal, coba OpenRouter (jika tersedia)
-        if (process.env.OPENROUTER_API_KEY) {
-          try {
-            raw = await generateWithOpenRouter(prompt);
-            usedProvider = "OpenRouter (fallback)";
-            console.log("✅ Beralih ke OpenRouter");
-          } catch (openRouterErr) {
-            console.error("OpenRouter juga gagal:", openRouterErr.message);
-            throw new Error(`Gemini gagal: ${geminiErr.message}. OpenRouter juga gagal: ${openRouterErr.message}`);
-          }
-        } else {
-          throw new Error(`Gemini gagal: ${geminiErr.message}. OpenRouter tidak dikonfigurasi.`);
-        }
-      }
-    } else if (process.env.OPENROUTER_API_KEY) {
-      // Jika tidak ada Gemini, langsung coba OpenRouter
-      raw = await generateWithOpenRouter(prompt);
-      usedProvider = "OpenRouter";
-    } else {
-      throw new Error("Tidak ada penyedia AI yang dikonfigurasi (GEMINI_API_KEY atau OPENROUTER_API_KEY)");
-    }
+    let raw = await callOpenRouter(prompt);
 
     // Bersihkan markdown
     const tick = "```";
@@ -270,11 +262,7 @@ app.post("/generate-quiz", async (req, res) => {
       }
     }
 
-    return res.json({
-      success: true,
-      questions: questionsArray,
-      provider: usedProvider
-    });
+    return res.json({ success: true, questions: questionsArray });
   } catch (err) {
     console.error("Generate Quiz Error:", err);
     return res.status(500).json({ success: false, message: err.message });

@@ -20,29 +20,20 @@ const PORT = process.env.PORT || 3000;
 
 // ================== CORS FIX ==================
 
-app.use(cors({
-
-  origin: [
-
-    "https://elearning-ai.infinityfreeapp.com",
-
-    "http://localhost:5500",
-
-    "http://127.0.0.1:5500"
-
-  ]
-
-}));
-
-
-
-// app.use(cors()) sudah otomatis menangani preflight OPTIONS
-
-// Tidak perlu menambahkan app.options() lagi
-
+app.use(cors());
 
 
 app.use(express.json());
+
+// ================== LOGGER ==================
+
+app.use((req, res, next) => {
+
+  console.log(req.method, req.url);
+
+  next();
+
+});
 
 
 
@@ -77,6 +68,14 @@ app.get("/", (req, res) => {
     dbConnected: !!db
 
   });
+
+});
+
+// ================== TEST ROUTE ==================
+
+app.get("/test", (req, res) => {
+
+  res.send("SERVER HIDUP");
 
 });
 
@@ -803,4 +802,3 @@ app.listen(PORT, () => {
   console.log("✅ Server berjalan di port " + PORT);
 
 });
-

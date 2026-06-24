@@ -135,55 +135,23 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
-// ================== HELPER: GEMINI VIA REST API ==================
-async function callGeminiREST(prompt) {
-  if (!process.env.GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY tidak diatur");
-  }
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: prompt }]
-          }
-        ]
-      })
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Gemini API Error ${response.status}: ${errorText}`);
-    }
-
-    const data = await response.json();
-
-    // Struktur respons Gemini: candidates[0].content.parts[0].text
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) throw new Error("Gemini tidak menghasilkan teks");
-    return text;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-// ================== HELPER: OPENROUTER ==================
+// ================== DAFTAR MODEL GRATIS OPENROUTER ==================
 const OPENROUTER_MODELS = [
   "google/gemini-2.0-flash-exp:free",
   "mistralai/mistral-7b-instruct:free",
   "deepseek/deepseek-chat:free",
-  "meta-llama/llama-3.3-70b-instruct:free"
+  "huggingfaceh4/zephyr-7b-beta:free",
+  "nousresearch/nous-hermes-2-mixtral-8x7b-dpo:free",
+  "undi95/toppy-m-7b:free",
+  "gryphe/mythomax-l2-13b:free",
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "meta-llama/llama-3.1-8b-instruct:free",
+  "microsoft/phi-3-mini-128k-instruct:free",
+  "qwen/qwen-2-7b-instruct:free",
+  "openchat/openchat-7b:free"
 ];
 
+// ================== HELPER: PANGGIL OPENROUTER DENGAN FALLBACK ==================
 async function callOpenRouter(prompt) {
   if (!process.env.OPENROUTER_API_KEY) {
     throw new Error("OPENROUTER_API_KEY tidak diatur");
@@ -192,7 +160,7 @@ async function callOpenRouter(prompt) {
   let lastError = null;
   for (const model of OPENROUTER_MODELS) {
     try {
-      console.log(`Mencoba model OpenRouter: ${model}`);
+      console.log(`Mencoba model: ${model}`);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 30000);
 
@@ -208,7 +176,7 @@ async function callOpenRouter(prompt) {
         body: JSON.stringify({
           model: model,
           messages: [
-            { role: "system", content: "Jawab HANYA JSON tanpa penjelasan." },
+            { role: "system", content: "Jawab HANYA JSON tanpa penjelasan tambahan." },
             { role: "user", content: prompt }
           ],
           temperature: 0.7,
@@ -221,21 +189,26 @@ async function callOpenRouter(prompt) {
       if (!response.ok) {
         const errorText = await response.text();
         console.warn(`Model ${model} error ${response.status}: ${errorText}`);
+        // Jika rate limit (429), tunggu 2 detik lalu lanjut
         if (response.status === 429) {
-          await new Promise(resolve => setTimeout(resolve, 2000)); // tunggu 2 detik
+          await new Promise(resolve => setTimeout(resolve, 2000));
         }
         continue;
       }
 
       const data = await response.json();
-      if (!data.choices?.[0]?.message) throw new Error("Respons AI tidak valid");
+      if (!data.choices?.[0]?.message) {
+        console.warn(`Model ${model} tidak menghasilkan teks`);
+        continue;
+      }
+      console.log(`✅ Berhasil dengan model: ${model}`);
       return data.choices[0].message.content;
     } catch (err) {
       console.warn(`Model ${model} gagal:`, err.message);
       lastError = err;
     }
   }
-  throw lastError || new Error("Semua model OpenRouter gagal");
+  throw lastError || new Error("Semua model OpenRouter gagal menghasilkan soal");
 }
 
 // ================== GENERATE QUIZ ==================
@@ -256,41 +229,16 @@ app.post("/generate-quiz", async (req, res) => {
       `[{"question": "Pertanyaan", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct": "A", "explanation": "Penjelasan"}] ` +
       `Jangan tambahkan teks apa pun selain JSON.`;
 
-    let raw = null;
-    let provider = "";
-
-    // 1. Coba Gemini dulu (jika ada key)
-    if (process.env.GEMINI_API_KEY) {
-      try {
-        raw = await callGeminiREST(prompt);
-        provider = "Gemini REST";
-        console.log("✅ Menggunakan Gemini REST");
-      } catch (e) {
-        console.warn("Gemini gagal:", e.message);
-      }
-    }
-
-    // 2. Jika Gemini tidak ada atau gagal, coba OpenRouter
-    if (!raw && process.env.OPENROUTER_API_KEY) {
-      try {
-        raw = await callOpenRouter(prompt);
-        provider = "OpenRouter";
-        console.log("✅ Menggunakan OpenRouter");
-      } catch (e) {
-        console.warn("OpenRouter gagal:", e.message);
-      }
-    }
-
-    if (!raw) throw new Error("Semua penyedia AI gagal menghasilkan soal");
+    const raw = await callOpenRouter(prompt);
 
     // Bersihkan markdown
     const tick = "```";
-    raw = raw.replace(tick + "json", "").replace(tick, "").trim();
-    const start = raw.indexOf("[");
-    const end = raw.lastIndexOf("]");
+    let cleaned = raw.replace(tick + "json", "").replace(tick, "").trim();
+    const start = cleaned.indexOf("[");
+    const end = cleaned.lastIndexOf("]");
     if (start === -1 || end === -1) throw new Error("Format JSON tidak ditemukan");
 
-    const jsonText = raw.substring(start, end + 1);
+    const jsonText = cleaned.substring(start, end + 1);
     let questionsArray = JSON.parse(jsonText);
     if (!Array.isArray(questionsArray)) questionsArray = [questionsArray];
 
@@ -301,12 +249,13 @@ app.post("/generate-quiz", async (req, res) => {
           "INSERT INTO ai_generated_quizzes (user_id, topic, num_questions, questions) VALUES (?, ?, ?, ?)",
           [userId, topic, jumlah, JSON.stringify(questionsArray)]
         );
+        console.log("✅ Quiz disimpan");
       } catch (dbErr) {
         console.warn("Gagal simpan quiz:", dbErr.message);
       }
     }
 
-    return res.json({ success: true, questions: questionsArray, provider });
+    return res.json({ success: true, questions: questionsArray });
   } catch (err) {
     console.error("Generate Quiz Error:", err);
     return res.status(500).json({ success: false, message: err.message });

@@ -170,7 +170,7 @@ async function callGroq(prompt) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "llama3-8b-8192",
+        model: "llama-3.1-8b-instant",          // Model aktif Groq (gratis)
         messages: [
           { role: "system", content: "Kamu adalah generator soal. Jawab HANYA dengan JSON tanpa penjelasan tambahan." },
           { role: "user", content: prompt }

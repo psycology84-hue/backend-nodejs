@@ -41,16 +41,14 @@ let pool = null;
       password: process.env.DB_PASSWORD,
       database: process.env.DB_NAME,
       waitForConnections: true,
-      connectionLimit: 10,   // maksimal 10 koneksi
+      connectionLimit: 10,
       queueLimit: 0
     });
 
-    // Tes koneksi awal
     const connection = await pool.getConnection();
     console.log("✅ Database terhubung (pool)");
     connection.release();
 
-    // Jalankan migrasi setelah pool siap
     await runMigrations(pool);
   } catch (err) {
     console.error("❌ Gagal koneksi database:", err.message);
@@ -139,15 +137,11 @@ app.post("/analyze", async (req, res) => {
 
     let activities = [];
     if (pool) {
-      try {
-        const [rows] = await pool.execute(
-          "SELECT id, title, type, content_url, style_target FROM activities WHERE style_target = ?",
-          [learning_style]
-        );
-        activities = rows || [];
-      } catch (dbErr) {
-        console.error("Error fetching activities:", dbErr);
-      }
+      const [rows] = await pool.execute(
+        "SELECT id, title, type, content_url, style_target FROM activities WHERE style_target = ?",
+        [learning_style]
+      );
+      activities = rows || [];
     }
 
     return res.json({ success: true, learning_style, scores, activities });
@@ -157,13 +151,13 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
-// ================== HELPER: GEMINI REST API ==================
-async function callGemini(prompt) {
-  if (!process.env.GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY tidak diatur. Tambahkan di environment variables Railway.");
+// ================== HELPER: GROQ CLOUD ==================
+async function callGroq(prompt) {
+  if (!process.env.GROQ_API_KEY) {
+    throw new Error("GROQ_API_KEY tidak diatur. Tambahkan di environment variables Railway.");
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  const url = "https://api.groq.com/openai/v1/chat/completions";
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
 
@@ -171,21 +165,31 @@ async function callGemini(prompt) {
     const response = await fetch(url, {
       method: "POST",
       signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }]
+        model: "llama3-8b-8192",
+        messages: [
+          { role: "system", content: "Kamu adalah generator soal. Jawab HANYA dengan JSON tanpa penjelasan tambahan." },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.7,
+        max_tokens: 2000
       })
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Gemini API Error ${response.status}: ${errorText}`);
+      throw new Error(`Groq API Error ${response.status}: ${errorText}`);
     }
 
     const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) throw new Error("Gemini tidak menghasilkan teks");
-    return text;
+    if (!data.choices?.[0]?.message?.content) {
+      throw new Error("Groq tidak menghasilkan teks");
+    }
+    return data.choices[0].message.content.trim();
   } finally {
     clearTimeout(timeout);
   }
@@ -209,7 +213,7 @@ app.post("/generate-quiz", async (req, res) => {
       `[{"question": "Pertanyaan", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct": "A", "explanation": "Penjelasan"}] ` +
       `Jangan tambahkan teks apa pun selain JSON.`;
 
-    const raw = await callGemini(prompt);
+    const raw = await callGroq(prompt);
 
     // Bersihkan markdown
     let cleaned = raw.replace(/```json|```/g, "").trim();
@@ -221,7 +225,7 @@ app.post("/generate-quiz", async (req, res) => {
     let questionsArray = JSON.parse(jsonText);
     if (!Array.isArray(questionsArray)) questionsArray = [questionsArray];
 
-    // Simpan ke DB (jika pool tersedia)
+    // Simpan ke DB
     if (pool) {
       try {
         await pool.execute(
@@ -249,12 +253,8 @@ app.post("/update_performance", (req, res) => {
 // ================== GET ALL ACTIVITIES ==================
 app.get("/activities", async (req, res) => {
   if (!pool) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
-  try {
-    const [activities] = await pool.execute("SELECT id, title, type, content_url, style_target FROM activities ORDER BY id DESC");
-    res.json({ success: true, activities });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
+  const [activities] = await pool.execute("SELECT id, title, type, content_url, style_target FROM activities ORDER BY id DESC");
+  res.json({ success: true, activities });
 });
 
 // ================== ADD ACTIVITY ==================

@@ -29,15 +29,37 @@ app.use((req, res, next) => {
   next();
 });
 
-let db = null;
+// ================== POOL DATABASE ==================
+let pool = null;
 
-// ================== HEALTH CHECK ==================
-app.get("/", (req, res) => {
-  res.json({ status: "OK", server: "AI Backend Running", dbConnected: !!db });
-});
+(async () => {
+  try {
+    pool = mysql.createPool({
+      host: process.env.DB_HOST,
+      port: process.env.DB_PORT || 3306,
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
+      database: process.env.DB_NAME,
+      waitForConnections: true,
+      connectionLimit: 10,   // maksimal 10 koneksi
+      queueLimit: 0
+    });
+
+    // Tes koneksi awal
+    const connection = await pool.getConnection();
+    console.log("✅ Database terhubung (pool)");
+    connection.release();
+
+    // Jalankan migrasi setelah pool siap
+    await runMigrations(pool);
+  } catch (err) {
+    console.error("❌ Gagal koneksi database:", err.message);
+    pool = null;
+  }
+})();
 
 // ================== MIGRASI ==================
-async function runMigrations(database) {
+async function runMigrations(pool) {
   console.log("📦 Menjalankan migrasi...");
   const createUsersTable =
     "CREATE TABLE IF NOT EXISTS users (" +
@@ -50,7 +72,7 @@ async function runMigrations(database) {
     "auditory_score FLOAT DEFAULT 0," +
     "reading_score FLOAT DEFAULT 0," +
     "kinesthetic_score FLOAT DEFAULT 0)";
-  await database.execute(createUsersTable);
+  await pool.execute(createUsersTable);
 
   const createClassificationRulesTable =
     "CREATE TABLE IF NOT EXISTS classification_rules (" +
@@ -59,11 +81,11 @@ async function runMigrations(database) {
     "auditory_weight FLOAT DEFAULT 1," +
     "reading_weight FLOAT DEFAULT 1," +
     "kinesthetic_weight FLOAT DEFAULT 1)";
-  await database.execute(createClassificationRulesTable);
+  await pool.execute(createClassificationRulesTable);
 
-  const [rules] = await database.execute("SELECT COUNT(*) cnt FROM classification_rules");
+  const [rules] = await pool.execute("SELECT COUNT(*) cnt FROM classification_rules");
   if (rules[0].cnt === 0) {
-    await database.execute(
+    await pool.execute(
       "INSERT INTO classification_rules (visual_weight,auditory_weight,reading_weight,kinesthetic_weight) VALUES (1,1,1,1)"
     );
   }
@@ -75,7 +97,7 @@ async function runMigrations(database) {
     "type ENUM('video','teks','praktik')," +
     "content_url VARCHAR(500)," +
     "style_target ENUM('visual','auditory','reading','kinesthetic'))";
-  await database.execute(createActivitiesTable);
+  await pool.execute(createActivitiesTable);
 
   const createQuizzesTable =
     "CREATE TABLE IF NOT EXISTS ai_generated_quizzes (" +
@@ -85,28 +107,23 @@ async function runMigrations(database) {
     "num_questions INT," +
     "questions LONGTEXT," +
     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)";
-  await database.execute(createQuizzesTable);
+  await pool.execute(createQuizzesTable);
 
   console.log("✅ Migrasi selesai");
 }
 
-// ================== KONEKSI DB ==================
-(async () => {
-  try {
-    db = await mysql.createConnection({
-      host: process.env.DB_HOST,
-      port: process.env.DB_PORT,
-      user: process.env.DB_USER,
-      password: process.env.DB_PASSWORD,
-      database: process.env.DB_NAME
-    });
-    console.log("✅ Database terhubung");
-    await runMigrations(db);
-  } catch (err) {
-    console.error("❌ Database gagal:", err.message);
-    db = null;
+// ================== HEALTH CHECK ==================
+app.get("/", async (req, res) => {
+  if (!pool) {
+    return res.json({ status: "OK", server: "AI Backend Running", dbConnected: false });
   }
-})();
+  try {
+    await pool.execute("SELECT 1");
+    res.json({ status: "OK", server: "AI Backend Running", dbConnected: true });
+  } catch (err) {
+    res.json({ status: "OK", server: "AI Backend Running", dbConnected: false });
+  }
+});
 
 // ================== ANALYZE ==================
 app.post("/analyze", async (req, res) => {
@@ -121,13 +138,18 @@ app.post("/analyze", async (req, res) => {
     const learning_style = Object.keys(scores).reduce((a, b) => scores[a] > scores[b] ? a : b);
 
     let activities = [];
-    if (db) {
-      const [rows] = await db.execute(
-        "SELECT id, title, type, content_url, style_target FROM activities WHERE style_target = ?",
-        [learning_style]
-      );
-      activities = rows || [];
+    if (pool) {
+      try {
+        const [rows] = await pool.execute(
+          "SELECT id, title, type, content_url, style_target FROM activities WHERE style_target = ?",
+          [learning_style]
+        );
+        activities = rows || [];
+      } catch (dbErr) {
+        console.error("Error fetching activities:", dbErr);
+      }
     }
+
     return res.json({ success: true, learning_style, scores, activities });
   } catch (err) {
     console.error(err);
@@ -135,10 +157,10 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
-// ================== HELPER: GEMINI VIA REST API ==================
+// ================== HELPER: GEMINI REST API ==================
 async function callGemini(prompt) {
   if (!process.env.GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY tidak diatur. Silakan tambahkan di environment variables.");
+    throw new Error("GEMINI_API_KEY tidak diatur. Tambahkan di environment variables Railway.");
   }
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
@@ -151,11 +173,7 @@ async function callGemini(prompt) {
       signal: controller.signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: prompt }]
-          }
-        ]
+        contents: [{ parts: [{ text: prompt }] }]
       })
     });
 
@@ -203,13 +221,14 @@ app.post("/generate-quiz", async (req, res) => {
     let questionsArray = JSON.parse(jsonText);
     if (!Array.isArray(questionsArray)) questionsArray = [questionsArray];
 
-    // Simpan ke DB
-    if (db) {
+    // Simpan ke DB (jika pool tersedia)
+    if (pool) {
       try {
-        await db.execute(
+        await pool.execute(
           "INSERT INTO ai_generated_quizzes (user_id, topic, num_questions, questions) VALUES (?, ?, ?, ?)",
           [userId, topic, jumlah, JSON.stringify(questionsArray)]
         );
+        console.log("✅ Quiz disimpan");
       } catch (dbErr) {
         console.warn("Gagal simpan quiz:", dbErr.message);
       }
@@ -229,30 +248,34 @@ app.post("/update_performance", (req, res) => {
 
 // ================== GET ALL ACTIVITIES ==================
 app.get("/activities", async (req, res) => {
-  if (!db) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
-  const [activities] = await db.execute("SELECT id, title, type, content_url, style_target FROM activities ORDER BY id DESC");
-  res.json({ success: true, activities });
+  if (!pool) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
+  try {
+    const [activities] = await pool.execute("SELECT id, title, type, content_url, style_target FROM activities ORDER BY id DESC");
+    res.json({ success: true, activities });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 // ================== ADD ACTIVITY ==================
 app.post("/add-activity", async (req, res) => {
-  if (!db) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
+  if (!pool) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
   const { title, type, content_url, style_target } = req.body;
   if (!title || !type || !content_url || !style_target) return res.status(400).json({ success: false, message: "Data tidak lengkap" });
-  await db.execute("INSERT INTO activities (title, type, content_url, style_target) VALUES (?, ?, ?, ?)", [title, type, content_url, style_target]);
+  await pool.execute("INSERT INTO activities (title, type, content_url, style_target) VALUES (?, ?, ?, ?)", [title, type, content_url, style_target]);
   res.json({ success: true, message: "Aktivitas ditambahkan" });
 });
 
 // ================== DELETE ACTIVITY ==================
 app.delete("/activity/:id", async (req, res) => {
-  if (!db) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
-  await db.execute("DELETE FROM activities WHERE id = ?", [req.params.id]);
+  if (!pool) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
+  await pool.execute("DELETE FROM activities WHERE id = ?", [req.params.id]);
   res.json({ success: true, message: "Aktivitas dihapus" });
 });
 
 // ================== SEED ACTIVITIES ==================
 app.post("/seed-activities", async (req, res) => {
-  if (!db) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
+  if (!pool) return res.status(500).json({ success: false, message: "Database tidak terhubung" });
   const sample = [
     { title: "Video - Matematika", type: "video", content_url: "https://www.youtube.com/embed/dQw4w9WgXcQ", style_target: "visual" },
     { title: "Teks - Sejarah", type: "teks", content_url: "https://example.com/sejarah.html", style_target: "reading" },
@@ -263,7 +286,7 @@ app.post("/seed-activities", async (req, res) => {
   let count = 0;
   for (const a of sample) {
     try {
-      await db.execute("INSERT INTO activities (title, type, content_url, style_target) VALUES (?, ?, ?, ?)", [a.title, a.type, a.content_url, a.style_target]);
+      await pool.execute("INSERT INTO activities (title, type, content_url, style_target) VALUES (?, ?, ?, ?)", [a.title, a.type, a.content_url, a.style_target]);
       count++;
     } catch (e) { console.warn("Mungkin sudah ada:", e.message); }
   }
